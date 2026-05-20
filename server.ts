@@ -123,20 +123,32 @@ Provide a JSON object containing EXACTLY two fields:
 
 Ensure that you include these delimiters clearly so my machine parser can extract them accurately. Do not fail. Output as requested.`;
 
-    // Direct conversion
-    const imagePart = {
-      inlineData: {
-        data: base64,
-        mimeType: mimeType,
-      },
-    };
-
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: [imagePart, { text: prompt }],
+      model: "gemini-2.0-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inlineData: { data: base64, mimeType } },
+            { text: prompt },
+          ],
+        },
+      ],
     });
 
-    const responseText = response.text || "";
+    // Extract text robustly — response.text can be null if safety filtered
+    const responseText: string =
+      response.text ??
+      (response as any).candidates?.[0]?.content?.parts
+        ?.filter((p: any) => p.text)
+        .map((p: any) => p.text as string)
+        .join("") ??
+      "";
+
+    if (!responseText) {
+      const reason = (response as any).candidates?.[0]?.finishReason ?? "unknown";
+      throw new Error(`Gemini a retourné une réponse vide (finishReason: ${reason}). Le fichier est peut-être trop grand ou filtré.`);
+    }
 
     // Parse output response using our tags
     let rawText = "";
