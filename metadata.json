@@ -1,0 +1,6 @@
+{
+  "name": "Convertisseur de Fichiers en Texte Brut",
+  "description": "Convertissez n'importe quel type de fichier (PDF, images, audio, documents, feuilles de calcul) en texte brut structuré pour l'indexation vectorielle (RAG).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
