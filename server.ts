@@ -7,7 +7,8 @@ import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { QdrantClient } from "@qdrant/js-client-rest";
 
-dotenv.config();
+dotenv.config({ path: ".env.local" });
+dotenv.config(); // fallback to .env
 
 const app = express();
 const PORT = 3000;
