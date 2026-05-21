@@ -183,7 +183,7 @@ export default function ChunkingOptionsPanel({ config, onChange }: ChunkingOptio
             <div className="flex items-center gap-1.5 px-3 py-2 rounded bg-amber-50/50 border border-amber-100/55">
               <Sparkles className="h-3.5 w-3.5 text-amber-500 animate-pulse-glow" />
               <div className="text-[10px] text-amber-800 leading-normal">
-                <strong>Ingestion propre :</strong> Le découpage sémantique facilite le RAG car Gemini extrait d'abord un <strong>contexte global</strong> et des <strong>mots-clés</strong> qui enrichiront l'index vectoriel.
+                <strong>Ingestion propre :</strong> Le découpage sémantique facilite le RAG car le modèle local extrait d'abord un <strong>contexte global</strong> et des <strong>mots-clés</strong> qui enrichiront l'index vectoriel.
               </div>
             </div>
           </div>

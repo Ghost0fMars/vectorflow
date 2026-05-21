@@ -3,55 +3,65 @@ import path from "path";
 import crypto from "crypto";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
-import OpenAI from "openai";
+import os from "os";
+import fs from "fs";
+import { execFile } from "child_process";
+import { promisify } from "util";
+const execFileAsync = promisify(execFile);
 import { QdrantClient } from "@qdrant/js-client-rest";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config(); // fallback to .env
 
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || "5000");
 
 // Increase payload limit to handle documents and audio base64 uploads
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// Initialize Gemini API client lazily
-let aiClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY key is missing. Please add it in your Secrets / Env variables.");
-    }
-    aiClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
+// Python embedding server (embed_server.py, port 8001)
+const EMBED_URL = (process.env.EMBED_LLM_URL || "http://localhost:8001") + "/v1/embeddings";
+const EMBED_MODEL = process.env.EMBED_MODEL || "intfloat/multilingual-e5-base";
+
+async function computeEmbeddings(texts: string[]): Promise<number[][]> {
+  let resp: Response;
+  try {
+    resp = await fetch(EMBED_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: texts, model: EMBED_MODEL }),
     });
+  } catch (e: any) {
+    if (e?.cause?.code === "ECONNREFUSED") {
+      throw new Error(
+        `Le serveur d'embeddings est injoignable (${EMBED_URL}). Lancez-le avec : python3 embed_server.py`
+      );
+    }
+    throw e;
   }
-  return aiClient;
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`Embedding server ${resp.status}: ${body}`);
+  }
+  const json = await resp.json() as { data: { embedding: number[]; index: number }[] };
+  return json.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
 }
 
-// Initialize OpenAI client lazily
-let openaiClient: OpenAI | null = null;
-function getOpenAIClient(): OpenAI {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      throw new Error("OPENAI_API_KEY manquante. Ajoutez-la dans votre fichier .env.");
-    }
-    openaiClient = new OpenAI({ apiKey });
-  }
-  return openaiClient;
+// MIME types that can be decoded from base64 to plain text
+function isTextDecodable(mimeType: string): boolean {
+  return (
+    mimeType.startsWith("text/") ||
+    mimeType === "application/json" ||
+    mimeType === "application/xml" ||
+    mimeType === "application/x-yaml" ||
+    mimeType === "application/javascript" ||
+    mimeType === "application/typescript"
+  );
 }
 
 // Initialize Qdrant client lazily
-const QDRANT_VECTOR_SIZE = 1536; // text-embedding-3-small
+const QDRANT_VECTOR_SIZE = parseInt(process.env.EMBED_VECTOR_SIZE || "768"); // multilingual-e5-base hidden size
 
 let qdrantClient: QdrantClient | null = null;
 function getQdrantClient(): QdrantClient {
@@ -63,7 +73,7 @@ function getQdrantClient(): QdrantClient {
   return qdrantClient;
 }
 
-// Ensure a Qdrant collection exists with cosine similarity on 1536-dim vectors
+// Ensure a Qdrant collection exists with cosine similarity
 async function ensureCollection(client: QdrantClient, name: string): Promise<void> {
   const { collections } = await client.getCollections();
   if (!collections.some((c) => c.name === name)) {
@@ -71,6 +81,17 @@ async function ensureCollection(client: QdrantClient, name: string): Promise<voi
       vectors: { size: QDRANT_VECTOR_SIZE, distance: "Cosine" },
     });
   }
+}
+
+// Run a command and return its stdout decoded as UTF-8 from raw bytes.
+// This avoids mojibake when the system locale is not UTF-8 (e.g. pdftotext/tesseract output).
+function execFileUtf8(cmd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { encoding: "buffer" }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(Buffer.from(stdout as unknown as Buffer).toString("utf8"));
+    });
+  });
 }
 
 // Convert an arbitrary string ID to a deterministic UUID for Qdrant
@@ -91,130 +112,80 @@ app.post("/api/convert", async (req, res) => {
       });
     }
 
-    const ai = getGeminiClient();
+    let fileContent: string;
 
-    // Standard instruction for Gemini to structure the extraction
-    const prompt = `You are a professional document extractor and formatting agent for vector indexing (RAG / embeddings).
-Analyze the attached file "${name}" (MIME-Type: ${mimeType}) and extract its complete structured content.
-
-Follow these strict output rules to provide high-quality chunks/vectors later:
-1. Preserve formatting elements like headings, bullet lists, bold emphasis, and code snippets.
-2. SPREADSHEETS AND TABLES MUST be converted into standard Markdown table syntax so coordinates, column headings, and cell relationships are preserved for vector similarity search.
-3. IMAGES / VISUALS MUST be subjected to precise OCR. For diagrams, charts, flowcharts, or infographics, include a detailed analytical text rendering of the visual relations to capture the semantic information.
-4. AUDIO files must be transcribed as accurately as possible. Output as clean paragraphs.
-5. FILTER OUT clutter like repeating running page headers, footers, and page numbers to avoid polluting token blocks.
-6. Provide exactly three parts in your response. Align them strictly inside these specific delimiter tags:
-
-[TEXT_START]
-Provide the full text extracted in standard RAW, clean plain text. Remove HTML tags, markdown symbols, and keep formatting basic (plain text).
-[TEXT_END]
-
-[MARKDOWN_START]
-Provide the full formatted text in standard Markdown format (including Markdown tables, bullet lists, structural bold text, code blocks, etc.).
-[MARKDOWN_END]
-
-[METADATA_START]
-Provide a JSON object containing EXACTLY two fields:
-{
-  "summary": "A brief, 2 to 3 sentences high-level description of what this document covers.",
-  "keywords": ["tag1", "tag2", "tag3", "tag4", "tag5"]
-}
-[METADATA_END]
-
-Ensure that you include these delimiters clearly so my machine parser can extract them accurately. Do not fail. Output as requested.`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { inlineData: { data: base64, mimeType } },
-            { text: prompt },
-          ],
-        },
-      ],
-    });
-
-    // Extract text robustly — response.text can be null if safety filtered
-    const responseText: string =
-      response.text ??
-      (response as any).candidates?.[0]?.content?.parts
-        ?.filter((p: any) => p.text)
-        .map((p: any) => p.text as string)
-        .join("") ??
-      "";
-
-    if (!responseText) {
-      const reason = (response as any).candidates?.[0]?.finishReason ?? "unknown";
-      throw new Error(`Gemini a retourné une réponse vide (finishReason: ${reason}). Le fichier est peut-être trop grand ou filtré.`);
-    }
-
-    // Parse output response using our tags
-    let rawText = "";
-    let markdownText = "";
-    let summary = "";
-    let keywords: string[] = [];
-
-    // Extract Raw Text
-    const rawMatch = responseText.match(/\[TEXT_START\]([\s\S]*?)\[TEXT_END\]/);
-    if (rawMatch) {
-      rawText = rawMatch[1].trim();
-    } else {
-      // Fallback
-      rawText = responseText.replace(/\[MARKDOWN_START[\s\S]*$/, "").trim();
-    }
-
-    // Extract Markdown Text
-    const mdMatch = responseText.match(/\[MARKDOWN_START\]([\s\S]*?)\[MARKDOWN_END\]/);
-    if (mdMatch) {
-      markdownText = mdMatch[1].trim();
-    } else {
-      markdownText = rawText || responseText;
-    }
-
-    // Extract Metadata JSON
-    const metaMatch = responseText.match(/\[METADATA_START\]([\s\S]*?)\[METADATA_END\]/);
-    if (metaMatch) {
+    if (mimeType === "application/pdf") {
+      const buffer = Buffer.from(base64, "base64");
+      const tmpDir = path.join(os.tmpdir(), `vf_${Date.now()}`);
+      fs.mkdirSync(tmpDir);
+      const tmpFile = path.join(tmpDir, "input.pdf");
       try {
-        const metadataJson = JSON.parse(metaMatch[1].trim());
-        summary = metadataJson.summary || "";
-        keywords = metadataJson.keywords || [];
-      } catch (e) {
-        console.error("Error parsing generated metadata JSON", e);
+        fs.writeFileSync(tmpFile, buffer);
+
+        // Attempt 1: pdftotext (fast, native text PDFs)
+        const pdfText = await execFileUtf8("pdftotext", ["-layout", "-enc", "UTF-8", tmpFile, "-"]);
+
+        const { stdout: pdfInfo } = await execFileAsync("pdfinfo", [tmpFile]).catch(() => ({ stdout: "" }));
+        const pageMatch = pdfInfo.match(/Pages:\s+(\d+)/);
+        const pageCount = pageMatch ? parseInt(pageMatch[1]) : 1;
+        const charsPerPage = pdfText.replace(/\s/g, "").length / pageCount;
+
+        if (charsPerPage >= 100) {
+          fileContent = pdfText;
+        } else {
+          // Attempt 2: OCR via pdftoppm + tesseract (scanned PDFs)
+          const imgPrefix = path.join(tmpDir, "page");
+          await execFileAsync("pdftoppm", ["-r", "300", "-png", tmpFile, imgPrefix]);
+
+          const pages = fs.readdirSync(tmpDir)
+            .filter((f) => f.endsWith(".png"))
+            .sort();
+
+          if (pages.length === 0) throw new Error("pdftoppm n'a produit aucune image.");
+
+          const pageTexts: string[] = [];
+          for (const p of pages) {
+            const text = await execFileUtf8("tesseract", [
+              path.join(tmpDir, p), "stdout", "-l", "fra+eng", "--psm", "1",
+            ]);
+            pageTexts.push(text);
+          }
+          fileContent = pageTexts.join("\n\n");
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
+
+      if (!fileContent.trim()) {
+        return res.status(422).json({
+          success: false,
+          error: "Impossible d'extraire du texte de ce PDF (protégé ou image sans contenu reconnaissable).",
+        });
+      }
+    } else if (isTextDecodable(mimeType)) {
+      fileContent = Buffer.from(base64, "base64").toString("utf-8");
+    } else {
+      return res.status(415).json({
+        success: false,
+        error: `Le type de fichier "${mimeType}" n'est pas supporté en mode local. Formats acceptés : PDF, TXT, CSV, JSON, XML, Markdown, code source. Les images et fichiers audio nécessitent un modèle multimodal.`,
+      });
     }
 
-    // Secondary fallback in case JSON extraction failed, try finding raw keys
-    if (!summary || keywords.length === 0) {
-      const summaryMatch = responseText.match(/"summary"\s*:\s*"([^"]+)"/);
-      if (summaryMatch) summary = summaryMatch[1];
-      
-      const keywordsMatch = responseText.match(/"keywords"\s*:\s*\[([^\]]+)\]/);
-      if (keywordsMatch) {
-        keywords = keywordsMatch[1].split(",").map(k => k.replace(/"/g, "").trim());
-      }
-    }
-
-    // Final checks
-    if (!rawText && responseText) {
-      rawText = responseText;
-      markdownText = responseText;
-    }
+    const rawText = fileContent.trim();
 
     res.json({
       success: true,
       rawText,
-      markdownText,
-      summary: summary || "Description non disponible",
-      keywords: keywords.length > 0 ? keywords : ["fichiers", "conversion", "texte"],
+      markdownText: rawText,
+      summary: "Description non disponible",
+      keywords: [],
     });
 
   } catch (error: any) {
     console.error("Full file conversion error:", error);
     res.status(500).json({
       success: false,
-      error: error.message || "An error occurred during file processing with Gemini.",
+      error: error.message || "Erreur lors du traitement du fichier par le modèle local.",
     });
   }
 });
@@ -231,18 +202,14 @@ app.post("/api/embed", async (req, res) => {
       });
     }
 
-    const openai = getOpenAIClient();
-    const BATCH_SIZE = 100;
+    const BATCH_SIZE = 64;
     const allEmbeddings: { id: string; vector: number[] }[] = [];
 
     for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
       const batch = chunks.slice(i, i + BATCH_SIZE);
-      const response = await openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: batch.map((c) => c.text),
-      });
-      response.data.forEach((item, idx) => {
-        allEmbeddings.push({ id: batch[idx].id, vector: item.embedding });
+      const vectors = await computeEmbeddings(batch.map((c) => c.text));
+      batch.forEach((c, idx) => {
+        allEmbeddings.push({ id: c.id, vector: vectors[idx] });
       });
     }
 
@@ -340,13 +307,7 @@ app.post("/api/search", async (req, res) => {
       });
     }
 
-    // Embed the query with the same model used for indexing
-    const openai = getOpenAIClient();
-    const embeddingRes = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: query,
-    });
-    const queryVector = embeddingRes.data[0].embedding;
+    const [queryVector] = await computeEmbeddings([query]);
 
     // Search similar vectors in Qdrant
     const client = getQdrantClient();

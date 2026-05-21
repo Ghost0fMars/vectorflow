@@ -1,0 +1,8 @@
+.\start-qdrant.ps1
+
+Service			Command
+Qdrant			docker start qdrant
+Embedding server	python3 embed_server.py
+VectorFlow app		npm run dev
+
+http://localhost:6333/dashboard#/collections

@@ -109,8 +109,8 @@ export default function DropZone({ onFilesSelected }: DropZoneProps) {
         Faites glisser et déposez vos fichiers ici
       </h3>
       <p className="text-gray-500 dark:text-gray-400 text-xs max-w-md leading-relaxed mb-4">
-        PDF, Word, Excel, CSV, Images (OCR), Audio (Transcription), Markdown, TXT.
-        Conversion automatique assistée par Gemini-3.5-Flash.
+        PDF, CSV, JSON, XML, Markdown, TXT, code source.
+        Conversion automatique via IA locale (Qwen2.5-Coder).
       </p>
 
       <button

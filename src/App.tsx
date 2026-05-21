@@ -108,7 +108,7 @@ export default function App() {
     }
   };
 
-  // Convert a single file utilizing Gemini 3.5 Flash
+  // Convert a single file utilizing the local LLM
   const convertFile = async (id: string) => {
     const file = files.find((f) => f.id === id);
     if (!file || file.status === "processing") return;
@@ -443,10 +443,10 @@ ${(file.chunks || [])
 index = pc.Index("mon-index-vectoriel")
 
 for item in chunks:
-    # Génération d'embedding dense de 1536 dimensions
+    # Génération d'embedding dense de 5120 dimensions
     res = openai_client.embeddings.create(
         input=item["text"],
-        model="text-embedding-3-small"
+        model="Qwen2.5-Coder-14B-Instruct-AWQ"
     )
     vector = res.data[0].embedding
     
@@ -528,8 +528,8 @@ print(f"Indexation réussie ! {len(chunks)} segments ingérés avec métadonnée
               <span className="text-[10px] uppercase text-violet-500 font-bold block mb-1">Vecteurs Indexés</span>
               <p className="text-2xl font-black text-violet-600 tracking-tight">{totalEmbeddedChunks}</p>
               <div className="flex items-center justify-between text-[9px] text-violet-500 mt-1 font-mono">
-                <span>text-embedding-3-small</span>
-                <span>1536D</span>
+                <span>Qwen2.5-Coder-14B</span>
+                <span>5120D</span>
               </div>
             </div>
           </div>
@@ -547,9 +547,9 @@ print(f"Indexation réussie ! {len(chunks)} segments ingérés avec métadonnée
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-slate-650 text-[11px] leading-relaxed">
               <p className="font-semibold text-slate-800 mb-1 flex items-center gap-1">
                 <Database className="h-3.5 w-3.5 text-slate-600 shrink-0" />
-                OCR & Audio inclus
+                100% Local
               </p>
-              Grâce à l'analyse multimodale de <strong>Gemini 3.5 Flash</strong>, importez également des images (schémas, scans de contrats) ou des fichiers audio (enregistrements) : ils seront transcrits et restructurés.
+              Traitement via <strong>Qwen2.5-Coder-14B</strong> en local (vLLM). PDF, CSV, JSON, Markdown et code source sont pris en charge. Aucune donnée n'est envoyée vers le cloud.
             </div>
           </div>
 
@@ -652,7 +652,7 @@ print(f"Indexation réussie ! {len(chunks)} segments ingérés avec métadonnée
                         onClick={() => embedFile(activeFile.id)}
                         disabled={activeFile.embeddingStatus === "processing" || !activeFile.chunks?.length}
                         className="flex items-center gap-1 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium text-xs rounded-lg shadow-sm transition active:scale-95"
-                        title="Générer les vecteurs (text-embedding-3-small)"
+                        title="Générer les vecteurs (Qwen2.5-Coder-14B)"
                       >
                         {activeFile.embeddingStatus === "processing" ? (
                           <RefreshCw className="h-3.5 w-3.5 animate-spin" />
@@ -711,7 +711,7 @@ print(f"Indexation réussie ! {len(chunks)} segments ingérés avec métadonnée
                     className="flex items-center justify-center gap-2 px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg transition shadow-md shadow-indigo-100 active:scale-95"
                   >
                     <Sparkles className="h-4 w-4" />
-                    Convertir avec Gemini-3.5-Flash
+                    Convertir avec IA Locale
                   </button>
                 )}
               </div>
@@ -992,9 +992,9 @@ print(f"Indexation réussie ! {len(chunks)} segments ingérés avec métadonnée
                         <div className="absolute inset-2 rounded-full border-3 border-t-indigo-600 animate-spin"></div>
                       </div>
                       <div>
-                        <h4 className="text-sm font-semibold text-slate-800">Prétraitement par Gemini-3.5-Flash</h4>
+                        <h4 className="text-sm font-semibold text-slate-800">Prétraitement par IA Locale</h4>
                         <p className="text-xs text-slate-400 max-w-sm mt-1 mx-auto leading-normal">
-                          OCR des figures, extraction sémantique des tableaux, de-cluttering et synthèse du fichier en cours...
+                          Extraction structurée, conversion Markdown, génération du résumé et des mots-clés en cours...
                         </p>
                       </div>
                     </div>
@@ -1183,7 +1183,7 @@ print(f"Indexation réussie ! {len(chunks)} segments ingérés avec métadonnée
           </span>
           <span className="hidden sm:inline text-slate-300">|</span>
           <span className="hidden sm:inline">
-            Modèle Cognitif : <strong>Gemini-3.5-Flash (Extraction multimodale)</strong>
+            Modèle : <strong>Qwen2.5-Coder-14B (vLLM local)</strong>
           </span>
         </div>
         <div className="flex items-center gap-3">

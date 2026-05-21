@@ -144,7 +144,7 @@ export default function FileList({
 
                   {isProcessing && (
                     <span className="text-[10px] font-mono font-bold text-indigo-500 mr-1 animate-pulse">
-                      Gemini...
+                      IA locale...
                     </span>
                   )}
 
