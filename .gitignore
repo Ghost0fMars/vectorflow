@@ -6,3 +6,5 @@ coverage/
 *.log
 .env.local
 !.env.example
+__pycache__/
+*.pyc
