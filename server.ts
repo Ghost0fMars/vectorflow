@@ -9,6 +9,8 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 const execFileAsync = promisify(execFile);
 import { QdrantClient } from "@qdrant/js-client-rest";
+import mammoth from "mammoth";
+import JSZip from "jszip";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config(); // fallback to .env
@@ -17,8 +19,8 @@ const app = express();
 const PORT = parseInt(process.env.PORT || "5000");
 
 // Increase payload limit to handle documents and audio base64 uploads
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ limit: "50mb", extended: true }));
+app.use(express.json({ limit: "500mb" }));
+app.use(express.urlencoded({ limit: "500mb", extended: true }));
 
 // Python embedding server (embed_server.py, port 8001)
 const EMBED_URL = (process.env.EMBED_LLM_URL || "http://localhost:8001") + "/v1/embeddings";
@@ -87,7 +89,7 @@ async function ensureCollection(client: QdrantClient, name: string): Promise<voi
 // This avoids mojibake when the system locale is not UTF-8 (e.g. pdftotext/tesseract output).
 function execFileUtf8(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { encoding: "buffer" }, (err, stdout) => {
+    execFile(cmd, args, { encoding: "buffer", maxBuffer: 256 * 1024 * 1024 }, (err, stdout) => {
       if (err) return reject(err);
       resolve(Buffer.from(stdout as unknown as Buffer).toString("utf8"));
     });
@@ -109,6 +111,15 @@ app.post("/api/convert", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "Missing parameters: 'name', 'mimeType', and 'base64' are required.",
+      });
+    }
+
+    const MAX_FILE_BYTES = 50 * 1024 * 1024; // 50 MB
+    const decodedSize = Math.floor((base64.length * 3) / 4);
+    if (decodedSize > MAX_FILE_BYTES) {
+      return res.status(413).json({
+        success: false,
+        error: `Fichier trop volumineux (${(decodedSize / 1024 / 1024).toFixed(1)} Mo). La limite est de ${MAX_FILE_BYTES / 1024 / 1024} Mo.`,
       });
     }
 
@@ -162,12 +173,30 @@ app.post("/api/convert", async (req, res) => {
           error: "Impossible d'extraire du texte de ce PDF (protégé ou image sans contenu reconnaissable).",
         });
       }
+    } else if (
+      mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+      mimeType === "application/msword"
+    ) {
+      const buffer = Buffer.from(base64, "base64");
+      const result = await mammoth.extractRawText({ buffer });
+      fileContent = result.value;
+    } else if (mimeType === "application/vnd.oasis.opendocument.text") {
+      const buffer = Buffer.from(base64, "base64");
+      const zip = await JSZip.loadAsync(buffer);
+      const contentXml = await zip.file("content.xml")?.async("string");
+      if (!contentXml) throw new Error("Fichier ODT invalide : content.xml introuvable.");
+      fileContent = contentXml
+        .replace(/<text:line-break[^/]*/g, "\n")
+        .replace(/<\/text:p>/g, "\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&apos;/g, "'").replace(/&quot;/g, '"')
+        .replace(/\n{3,}/g, "\n\n");
     } else if (isTextDecodable(mimeType)) {
       fileContent = Buffer.from(base64, "base64").toString("utf-8");
     } else {
       return res.status(415).json({
         success: false,
-        error: `Le type de fichier "${mimeType}" n'est pas supporté en mode local. Formats acceptés : PDF, TXT, CSV, JSON, XML, Markdown, code source. Les images et fichiers audio nécessitent un modèle multimodal.`,
+        error: `Le type de fichier "${mimeType}" n'est pas supporté en mode local. Formats acceptés : PDF, DOCX, ODT, TXT, CSV, JSON, XML, Markdown, code source. Les images et fichiers audio nécessitent un modèle multimodal.`,
       });
     }
 

@@ -41,7 +41,15 @@ export default function DropZone({ onFilesSelected }: DropZoneProps) {
     });
   };
 
+  const MAX_FILE_BYTES = 50 * 1024 * 1024; // 50 MB
+
   const handleFiles = async (fileList: FileList) => {
+    const oversized = Array.from(fileList).filter((f) => f.size > MAX_FILE_BYTES);
+    if (oversized.length > 0) {
+      const names = oversized.map((f) => `${f.name} (${(f.size / 1024 / 1024).toFixed(1)} Mo)`).join(", ");
+      alert(`Fichier(s) trop volumineux (limite : ${MAX_FILE_BYTES / 1024 / 1024} Mo) :\n${names}`);
+      return;
+    }
     const promises = Array.from(fileList).map((file) => processFile(file));
     try {
       const processed = await Promise.all(promises);
