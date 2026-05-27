@@ -11,6 +11,10 @@ import {
   Layers,
   RefreshCw,
   Cpu,
+  Share2,
+  FileDown,
+  Table,
+  Archive,
 } from "lucide-react";
 import DropZone from "./components/DropZone";
 import ChunkingOptionsPanel from "./components/ChunkingOptionsPanel";
@@ -40,6 +44,19 @@ export default function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const [exportLoading, setExportLoading] = useState<{
+    sqlite: boolean;
+    snapshot: boolean;
+    json: boolean;
+    csv: boolean;
+  }>({
+    sqlite: false,
+    snapshot: false,
+    json: false,
+    csv: false,
+  });
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const activeFile = files.find((f) => f.id === activeFileId);
 
@@ -243,6 +260,37 @@ export default function App() {
       setSearchError(err.message);
     } finally {
       setSearchLoading(false);
+    }
+  };
+
+  const handleExport = async (format: "sqlite" | "snapshot" | "json" | "csv") => {
+    setExportLoading((prev) => ({ ...prev, [format]: true }));
+    setExportError(null);
+    try {
+      const response = await fetch(`/api/export/${format}?collection=${collectionName}`);
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error || `Erreur lors de l'exportation (${response.status})`);
+      }
+      
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      
+      let ext = format === "sqlite" ? "db" : format;
+      if (format === "snapshot") ext = "snapshot";
+      
+      a.download = `${collectionName}_export.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error(err);
+      setExportError(err.message || "Une erreur est survenue lors de l'exportation.");
+    } finally {
+      setExportLoading((prev) => ({ ...prev, [format]: false }));
     }
   };
 
@@ -730,12 +778,114 @@ export default function App() {
               Créée automatiquement si inexistante.
             </p>
           </div>
+
+          <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col gap-3">
+            <div>
+              <h3 className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                <Share2 className="h-3.5 w-3.5 text-indigo-600" />
+                Exporter la Collection
+              </h3>
+              <p className="text-[10px] text-slate-400 mt-1">
+                Téléchargez la base de données vectorielle complète pour l'intégrer dans d'autres applications.
+              </p>
+            </div>
+
+            {exportError && (
+              <div className="flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg p-2.5 font-mono">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                {exportError}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-2">
+              {/* SQLite Export Button */}
+              <button
+                type="button"
+                onClick={() => handleExport("sqlite")}
+                disabled={Object.values(exportLoading).some(Boolean)}
+                className="group relative flex items-center gap-3 p-2.5 rounded-lg border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/20 text-left transition disabled:opacity-50 disabled:pointer-events-none active:scale-[0.98]"
+              >
+                <div className="w-8 h-8 rounded bg-indigo-50 group-hover:bg-indigo-100 flex items-center justify-center shrink-0 transition">
+                  {exportLoading.sqlite ? (
+                    <RefreshCw className="h-4 w-4 text-indigo-600 animate-spin" />
+                  ) : (
+                    <Database className="h-4 w-4 text-indigo-600" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-slate-800">Base SQLite (.db)</div>
+                  <div className="text-[9px] text-slate-400 truncate">Base relationnelle complète avec embeddings</div>
+                </div>
+                <Download className="h-3.5 w-3.5 text-slate-400 group-hover:text-indigo-600 transition" />
+              </button>
+
+              {/* Qdrant Snapshot Export Button */}
+              <button
+                type="button"
+                onClick={() => handleExport("snapshot")}
+                disabled={Object.values(exportLoading).some(Boolean)}
+                className="group relative flex items-center gap-3 p-2.5 rounded-lg border border-slate-200 hover:border-violet-300 hover:bg-violet-50/20 text-left transition disabled:opacity-50 disabled:pointer-events-none active:scale-[0.98]"
+              >
+                <div className="w-8 h-8 rounded bg-violet-50 group-hover:bg-violet-100 flex items-center justify-center shrink-0 transition">
+                  {exportLoading.snapshot ? (
+                    <RefreshCw className="h-4 w-4 text-violet-600 animate-spin" />
+                  ) : (
+                    <Archive className="h-4 w-4 text-violet-600" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-slate-800">Snapshot Qdrant (.snapshot)</div>
+                  <div className="text-[9px] text-slate-400 truncate">Export d'archive officiel pour serveur Qdrant</div>
+                </div>
+                <Download className="h-3.5 w-3.5 text-slate-400 group-hover:text-violet-600 transition" />
+              </button>
+
+              {/* JSON Export Button */}
+              <button
+                type="button"
+                onClick={() => handleExport("json")}
+                disabled={Object.values(exportLoading).some(Boolean)}
+                className="group relative flex items-center gap-3 p-2.5 rounded-lg border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/20 text-left transition disabled:opacity-50 disabled:pointer-events-none active:scale-[0.98]"
+              >
+                <div className="w-8 h-8 rounded bg-emerald-50 group-hover:bg-emerald-100 flex items-center justify-center shrink-0 transition">
+                  {exportLoading.json ? (
+                    <RefreshCw className="h-4 w-4 text-emerald-600 animate-spin" />
+                  ) : (
+                    <FileDown className="h-4 w-4 text-emerald-600" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-slate-800">Format JSON (.json)</div>
+                  <div className="text-[9px] text-slate-400 truncate">Export structuré complet avec vecteurs & métadonnées</div>
+                </div>
+                <Download className="h-3.5 w-3.5 text-slate-400 group-hover:text-emerald-600 transition" />
+              </button>
+
+              {/* CSV Export Button */}
+              <button
+                type="button"
+                onClick={() => handleExport("csv")}
+                disabled={Object.values(exportLoading).some(Boolean)}
+                className="group relative flex items-center gap-3 p-2.5 rounded-lg border border-slate-200 hover:border-amber-300 hover:bg-amber-50/20 text-left transition disabled:opacity-50 disabled:pointer-events-none active:scale-[0.98]"
+              >
+                <div className="w-8 h-8 rounded bg-amber-50 group-hover:bg-amber-100 flex items-center justify-center shrink-0 transition">
+                  {exportLoading.csv ? (
+                    <RefreshCw className="h-4 w-4 text-amber-600 animate-spin" />
+                  ) : (
+                    <Table className="h-4 w-4 text-amber-600" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-slate-800">Format CSV (.csv)</div>
+                  <div className="text-[9px] text-slate-400 truncate">Export tabulaire simple, idéal tableurs/scripts</div>
+                </div>
+                <Download className="h-3.5 w-3.5 text-slate-400 group-hover:text-amber-600 transition" />
+              </button>
+            </div>
+          </div>
         </aside>
       </main>
 
-      <footer className="h-9 bg-white border-t border-slate-100 px-5 flex items-center text-[10px] text-slate-400 font-mono">
-        VectorFlow · Qdrant {collectionName} · multilingual-e5-base 768D
-      </footer>
     </div>
   );
 }

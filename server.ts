@@ -365,6 +365,173 @@ app.post("/api/search", async (req, res) => {
   }
 });
 
+// Helper function to scroll and retrieve all points from a Qdrant collection
+async function scrollAllPoints(collectionName: string): Promise<any[]> {
+  const client = getQdrantClient();
+  let offset: any = null;
+  const allPoints: any[] = [];
+  do {
+    const response = await client.scroll(collectionName, {
+      limit: 100,
+      offset: offset,
+      with_payload: true,
+      with_vector: true,
+    });
+    allPoints.push(...response.points);
+    offset = response.next_page_offset;
+  } while (offset !== null);
+  return allPoints;
+}
+
+// Utility to escape CSV cell contents
+function escapeCSV(val: any): string {
+  if (val === undefined || val === null) return "";
+  let str = typeof val === "string" ? val : JSON.stringify(val);
+  str = str.replace(/"/g, '""');
+  if (str.includes(",") || str.includes("\n") || str.includes('"')) {
+    return `"${str}"`;
+  }
+  return str;
+}
+
+// JSON export endpoint
+app.get("/api/export/json", async (req, res) => {
+  try {
+    const { collection } = req.query;
+    if (!collection || typeof collection !== "string") {
+      return res.status(400).json({ success: false, error: "Le paramètre 'collection' est requis." });
+    }
+    const points = await scrollAllPoints(collection);
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename=${collection}_export.json`);
+    res.send(JSON.stringify({ collection, points }, null, 2));
+  } catch (error: any) {
+    console.error("JSON export error:", error);
+    res.status(500).json({ success: false, error: error.message || "Erreur lors de l'exportation JSON." });
+  }
+});
+
+// CSV export endpoint
+app.get("/api/export/csv", async (req, res) => {
+  try {
+    const { collection } = req.query;
+    if (!collection || typeof collection !== "string") {
+      return res.status(400).json({ success: false, error: "Le paramètre 'collection' est requis." });
+    }
+    const points = await scrollAllPoints(collection);
+    
+    let csv = "\uFEFFid,document_name,chunk_index,text,metadata,embedding\n";
+    for (const p of points) {
+      const payload = p.payload || {};
+      const id = p.id;
+      const docName = payload.source || payload.fileName || "";
+      const chunkIndex = payload.chunkIndex ?? "";
+      const text = payload.text || "";
+      
+      const metadata = { ...payload };
+      delete metadata.text;
+      const metadataStr = JSON.stringify(metadata);
+      
+      const embeddingStr = p.vector ? JSON.stringify(p.vector) : "";
+      
+      csv += `${escapeCSV(id)},${escapeCSV(docName)},${escapeCSV(chunkIndex)},${escapeCSV(text)},${escapeCSV(metadataStr)},${escapeCSV(embeddingStr)}\n`;
+    }
+    
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=${collection}_export.csv`);
+    res.send(csv);
+  } catch (error: any) {
+    console.error("CSV export error:", error);
+    res.status(500).json({ success: false, error: error.message || "Erreur lors de l'exportation CSV." });
+  }
+});
+
+// SQLite export endpoint (calls export_sqlite.py script)
+app.get("/api/export/sqlite", async (req, res) => {
+  try {
+    const { collection } = req.query;
+    if (!collection || typeof collection !== "string") {
+      return res.status(400).json({ success: false, error: "Le paramètre 'collection' est requis." });
+    }
+    const points = await scrollAllPoints(collection);
+    
+    const tmpDir = path.join(os.tmpdir(), `vf_sql_${Date.now()}`);
+    fs.mkdirSync(tmpDir);
+    const jsonPath = path.join(tmpDir, "data.json");
+    const dbPath = path.join(tmpDir, `${collection}.db`);
+    
+    try {
+      fs.writeFileSync(jsonPath, JSON.stringify({ points }));
+      
+      // Execute the python script to convert JSON to SQLite db
+      await execFileAsync("python3", ["export_sqlite.py", jsonPath, dbPath]);
+      
+      if (!fs.existsSync(dbPath)) {
+        throw new Error("Le fichier SQLite n'a pas été généré.");
+      }
+      
+      res.download(dbPath, `${collection}.db`, (err) => {
+        // Cleanup after download completes
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch (cleanupErr) {
+          console.error("Cleanup error:", cleanupErr);
+        }
+      });
+    } catch (innerErr: any) {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {}
+      throw innerErr;
+    }
+  } catch (error: any) {
+    console.error("SQLite export error:", error);
+    res.status(500).json({ success: false, error: error.message || "Erreur lors de l'exportation SQLite." });
+  }
+});
+
+// Qdrant Snapshot export endpoint
+app.get("/api/export/snapshot", async (req, res) => {
+  try {
+    const { collection } = req.query;
+    if (!collection || typeof collection !== "string") {
+      return res.status(400).json({ success: false, error: "Le paramètre 'collection' est requis." });
+    }
+    
+    const client = getQdrantClient();
+    const snapshotInfo = await client.createSnapshot(collection);
+    const snapshotName = (snapshotInfo as any).name || (snapshotInfo as any).result?.name;
+    
+    if (!snapshotName) {
+      throw new Error("Impossible d'obtenir le nom du snapshot créé depuis Qdrant.");
+    }
+    
+    const qdrantUrl = process.env.QDRANT_URL || "http://localhost:6333";
+    const apiKey = process.env.QDRANT_API_KEY;
+    const downloadUrl = `${qdrantUrl}/collections/${collection}/snapshots/${snapshotName}`;
+    
+    const headers: Record<string, string> = {};
+    if (apiKey) {
+      headers["api-key"] = apiKey;
+    }
+    
+    const response = await fetch(downloadUrl, { headers });
+    if (!response.ok) {
+      throw new Error(`Échec du téléchargement du snapshot depuis Qdrant: ${response.statusText}`);
+    }
+    
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename=${snapshotName}`);
+    
+    const arrayBuffer = await response.arrayBuffer();
+    res.send(Buffer.from(arrayBuffer));
+  } catch (error: any) {
+    console.error("Snapshot export error:", error);
+    res.status(500).json({ success: false, error: error.message || "Erreur lors de l'exportation du snapshot Qdrant." });
+  }
+});
+
+
 // Setup dev server or static serve logic
 async function bootstrap() {
   if (process.env.NODE_ENV !== "production") {
