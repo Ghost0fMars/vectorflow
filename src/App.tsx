@@ -43,6 +43,10 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchError, setSearchError] = useState<string | null>(null);
 
+  const [synthesisAnswer, setSynthesisAnswer] = useState<string | null>(null);
+  const [synthesisLoading, setSynthesisLoading] = useState(false);
+  const [synthesisError, setSynthesisError] = useState<string | null>(null);
+
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const [exportLoading, setExportLoading] = useState<{
@@ -117,7 +121,12 @@ export default function App() {
       const response = await fetch("/api/convert", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: file.name, mimeType: file.type, base64: base64Data }),
+        body: JSON.stringify({
+          name: file.name,
+          mimeType: file.type,
+          base64: base64Data,
+          enrichWithAI: config.enrichWithAI,
+        }),
       });
 
       if (!response.ok) {
@@ -247,6 +256,8 @@ export default function App() {
     setSearchLoading(true);
     setSearchError(null);
     setSearchResults([]);
+    setSynthesisAnswer(null);
+    setSynthesisError(null);
     try {
       const response = await fetch("/api/search", {
         method: "POST",
@@ -260,6 +271,33 @@ export default function App() {
       setSearchError(err.message);
     } finally {
       setSearchLoading(false);
+    }
+  };
+
+  const performSynthesis = async () => {
+    if (!searchQuery.trim() || searchResults.length === 0) return;
+    setSynthesisLoading(true);
+    setSynthesisError(null);
+    setSynthesisAnswer(null);
+    try {
+      const response = await fetch("/api/synthesize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: searchQuery, results: searchResults }),
+      });
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error || `Erreur serveur : Code ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (!data.success) throw new Error(data.error || "Échec de la synthèse RAG.");
+      setSynthesisAnswer(data.answer);
+    } catch (err: any) {
+      setSynthesisError(err.message || "Une erreur inconnue est survenue.");
+    } finally {
+      setSynthesisLoading(false);
     }
   };
 
@@ -723,7 +761,67 @@ export default function App() {
               )}
 
               {searchResults.length > 0 && (
-                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                <>
+                  {/* Ollama RAG Synthesis Card */}
+                  <div className="p-4 rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50/50 via-white to-violet-50/30 shadow-sm flex flex-col gap-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="h-4 w-4 text-violet-500 animate-pulse" />
+                        <span className="text-xs font-bold text-slate-800">Synthèse RAG par Ollama</span>
+                      </div>
+                      {!synthesisAnswer && !synthesisLoading && (
+                        <button
+                          type="button"
+                          onClick={performSynthesis}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer shadow-sm"
+                        >
+                          <Cpu className="h-3.5 w-3.5 animate-pulse" />
+                          Rédiger la réponse locale
+                        </button>
+                      )}
+                    </div>
+
+                    {synthesisLoading && (
+                      <div className="flex items-center gap-3 py-2 text-xs text-indigo-600 font-medium">
+                        <RefreshCw className="h-4 w-4 animate-spin text-indigo-600 shrink-0" />
+                        <span>Ollama prépare une réponse de synthèse à partir des segments de document...</span>
+                      </div>
+                    )}
+
+                    {synthesisError && (
+                      <div className="flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg p-2.5 font-mono">
+                        <AlertCircle className="h-4 w-4 shrink-0" />
+                        {synthesisError}
+                      </div>
+                    )}
+
+                    {synthesisAnswer && (
+                      <div className="flex flex-col gap-2 animate-fade-in">
+                        <div className="bg-white/80 backdrop-blur-sm p-4 border border-indigo-50 rounded-lg text-xs text-slate-800 font-sans leading-relaxed whitespace-pre-wrap shadow-inner relative group/answer">
+                          {synthesisAnswer}
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(synthesisAnswer, "synthesis")}
+                            className="absolute top-2 right-2 p-1.5 text-slate-450 hover:text-indigo-600 hover:bg-slate-50 border border-transparent hover:border-slate-100 rounded-md opacity-0 group-hover/answer:opacity-100 transition-all focus:opacity-100 cursor-pointer"
+                            title="Copier la réponse"
+                          >
+                            {copiedId === "synthesis" ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                          </button>
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-mono flex items-center justify-between px-1">
+                          <span>Généré localement</span>
+                          {copiedId === "synthesis" && <span className="text-emerald-600 font-semibold animate-fade-in">Copié dans le presse-papiers !</span>}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="text-[11px] text-slate-400 font-semibold mt-1 px-1 flex items-center gap-1.5 shrink-0">
+                    <Database className="h-3.5 w-3.5 text-slate-400" />
+                    Segments de documents associés (Sources)
+                  </div>
+
+                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                   {searchResults.map((result, i) => (
                     <div key={i} className="bg-slate-50 border border-slate-200 rounded-lg overflow-hidden">
                       <div className="flex items-center justify-between px-3 py-1.5 bg-white border-b border-slate-100 text-[10px] font-mono text-slate-500">
@@ -747,6 +845,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+                </>
               )}
 
               {searchResults.length === 0 && !searchLoading && !searchError && (

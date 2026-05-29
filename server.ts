@@ -22,32 +22,107 @@ const PORT = parseInt(process.env.PORT || "5000");
 app.use(express.json({ limit: "500mb" }));
 app.use(express.urlencoded({ limit: "500mb", extended: true }));
 
-// Python embedding server (embed_server.py, port 8001)
+// Ollama configuration
+const USE_OLLAMA = process.env.USE_OLLAMA === "true";
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+const OLLAMA_EMBED_MODEL = process.env.OLLAMA_EMBED_MODEL || "nomic-embed-text:latest";
+const OLLAMA_CHAT_MODEL = process.env.OLLAMA_CHAT_MODEL || "gemma3:12b";
+
+// Python embedding server (embed_server.py, port 8001 - fallback)
 const EMBED_URL = (process.env.EMBED_LLM_URL || "http://localhost:8001") + "/v1/embeddings";
 const EMBED_MODEL = process.env.EMBED_MODEL || "intfloat/multilingual-e5-base";
 
 async function computeEmbeddings(texts: string[]): Promise<number[][]> {
-  let resp: Response;
+  if (USE_OLLAMA) {
+    try {
+      const resp = await fetch(`${OLLAMA_URL}/api/embed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: texts, model: OLLAMA_EMBED_MODEL }),
+      });
+
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        throw new Error(`Ollama embedding error ${resp.status}: ${body}`);
+      }
+
+      const json = await resp.json() as { embeddings: number[][] };
+      return json.embeddings;
+    } catch (e: any) {
+      if (e?.cause?.code === "ECONNREFUSED" || e?.message?.includes("fetch failed")) {
+        throw new Error(
+          `Ollama est injoignable (${OLLAMA_URL}). Assurez-vous qu'Ollama est démarré et que le modèle '${OLLAMA_EMBED_MODEL}' est installé (ex: ollama pull ${OLLAMA_EMBED_MODEL}).`
+        );
+      }
+      throw e;
+    }
+  } else {
+    let resp: Response;
+    try {
+      resp = await fetch(EMBED_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: texts, model: EMBED_MODEL }),
+      });
+    } catch (e: any) {
+      if (e?.cause?.code === "ECONNREFUSED") {
+        throw new Error(
+          `Le serveur d'embeddings est injoignable (${EMBED_URL}). Lancez-le avec : python3 embed_server.py ou activez Ollama dans le fichier .env.`
+        );
+      }
+      throw e;
+    }
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`Embedding server ${resp.status}: ${body}`);
+    }
+    const json = await resp.json() as { data: { embedding: number[]; index: number }[] };
+    return json.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+  }
+}
+
+async function generateSummaryAndKeywords(text: string): Promise<{ summary: string; keywords: string[] }> {
+  const maxChars = 8000;
+  const truncatedText = text.length > maxChars ? text.slice(0, maxChars) + "..." : text;
+
   try {
-    resp = await fetch(EMBED_URL, {
+    const prompt = `Analyse le texte suivant et retourne un objet JSON contenant exactement deux clés:
+- "summary": un résumé clair, informatif et concis du texte en français (environ 2-3 phrases).
+- "keywords": une liste de 3 à 5 mots-clés importants en français.
+
+Texte à analyser :
+${truncatedText}`;
+
+    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: texts, model: EMBED_MODEL }),
+      body: JSON.stringify({
+        model: OLLAMA_CHAT_MODEL,
+        prompt,
+        format: "json",
+        stream: false,
+      }),
     });
-  } catch (e: any) {
-    if (e?.cause?.code === "ECONNREFUSED") {
-      throw new Error(
-        `Le serveur d'embeddings est injoignable (${EMBED_URL}). Lancez-le avec : python3 embed_server.py`
-      );
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      throw new Error(`Ollama generation failed with status ${resp.status}: ${errText}`);
     }
-    throw e;
+
+    const json = await resp.json() as { response: string };
+    const parsed = JSON.parse(json.response) as { summary: string; keywords: string[] };
+
+    return {
+      summary: parsed.summary || "Aucun résumé disponible",
+      keywords: Array.isArray(parsed.keywords) ? parsed.keywords : [],
+    };
+  } catch (e: any) {
+    console.error("Failed to generate AI enrichment with Ollama:", e);
+    return {
+      summary: "Description non disponible (erreur d'enrichissement IA)",
+      keywords: [],
+    };
   }
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`Embedding server ${resp.status}: ${body}`);
-  }
-  const json = await resp.json() as { data: { embedding: number[]; index: number }[] };
-  return json.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
 }
 
 // MIME types that can be decoded from base64 to plain text
@@ -202,12 +277,22 @@ app.post("/api/convert", async (req, res) => {
 
     const rawText = fileContent.trim();
 
+    let summary = "Description non disponible";
+    let keywords: string[] = [];
+
+    // Check if the user requested AI enrichment and Ollama is active
+    if (req.body.enrichWithAI && USE_OLLAMA) {
+      const enrichment = await generateSummaryAndKeywords(rawText);
+      summary = enrichment.summary;
+      keywords = enrichment.keywords;
+    }
+
     res.json({
       success: true,
       rawText,
       markdownText: rawText,
-      summary: "Description non disponible",
-      keywords: [],
+      summary,
+      keywords,
     });
 
   } catch (error: any) {
@@ -361,6 +446,78 @@ app.post("/api/search", async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message || "Erreur lors de la recherche sémantique.",
+    });
+  }
+});
+
+// REST API endpoint to synthesize a response using RAG and Ollama
+app.post("/api/synthesize", async (req, res) => {
+  try {
+    const { query, results } = req.body as {
+      query: string;
+      results: { score: number; text: string }[];
+    };
+
+    if (!query || !results || !Array.isArray(results)) {
+      return res.status(400).json({
+        success: false,
+        error: "'query' et 'results' sont requis.",
+      });
+    }
+
+    if (!USE_OLLAMA) {
+      return res.status(400).json({
+        success: false,
+        error: "La synthèse de réponses nécessite d'activer Ollama (USE_OLLAMA=true dans le fichier .env).",
+      });
+    }
+
+    if (results.length === 0) {
+      return res.json({
+        success: true,
+        answer: "Aucun segment trouvé pour répondre à la question.",
+      });
+    }
+
+    const context = results.map((r, i) => `[Segment #${i + 1}]\n${r.text}`).join("\n\n");
+
+    const prompt = `Tu es un assistant IA expert. Réponds à la question de l'utilisateur de manière précise, claire et exhaustive en français en te basant UNIQUEMENT sur les segments de document fournis ci-dessous.
+Si les segments ne contiennent pas l'information pour répondre, dis-le poliment mais ne tente pas d'inventer.
+
+=== SEGMENTS DE DOCUMENT ===
+${context}
+============================
+
+Question : ${query}
+
+Réponse synthétisée en français :`;
+
+    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_CHAT_MODEL,
+        prompt,
+        stream: false,
+      }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      throw new Error(`Ollama generation failed with status ${resp.status}: ${errText}`);
+    }
+
+    const json = await resp.json() as { response: string };
+    
+    res.json({
+      success: true,
+      answer: json.response.trim(),
+    });
+  } catch (error: any) {
+    console.error("Synthesize error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message || "Erreur lors de la génération de la réponse.",
     });
   }
 });
@@ -532,8 +689,42 @@ app.get("/api/export/snapshot", async (req, res) => {
 });
 
 
+async function checkOllamaConnection() {
+  if (!USE_OLLAMA) return;
+
+  try {
+    const resp = await fetch(`${OLLAMA_URL}/api/tags`);
+    if (resp.ok) {
+      const data = await resp.json() as { models: { name: string }[] };
+      const modelNames = data.models.map(m => m.name);
+      console.log("\x1b[32m%s\x1b[0m", "✓ Ollama connecté avec succès !");
+      console.log("Modèles disponibles dans Ollama :", modelNames.join(", "));
+      
+      const hasEmbed = modelNames.some(name => name.startsWith(OLLAMA_EMBED_MODEL));
+      if (!hasEmbed) {
+        console.log("\x1b[33m%s\x1b[0m", `⚠ Attention : Le modèle d'embedding '${OLLAMA_EMBED_MODEL}' n'est pas détecté dans Ollama.`);
+        console.log(`Exécutez : ollama pull ${OLLAMA_EMBED_MODEL}`);
+      }
+
+      const hasChat = modelNames.some(name => name.startsWith(OLLAMA_CHAT_MODEL));
+      if (!hasChat) {
+        console.log("\x1b[33m%s\x1b[0m", `⚠ Attention : Le modèle de chat/synthèse '${OLLAMA_CHAT_MODEL}' n'est pas détecté dans Ollama.`);
+        console.log(`Exécutez : ollama pull ${OLLAMA_CHAT_MODEL}`);
+      }
+    } else {
+      console.log("\x1b[33m%s\x1b[0m", `⚠ Impossible de lister les modèles Ollama : ${resp.statusText}`);
+    }
+  } catch (e: any) {
+    console.log("\x1b[31m%s\x1b[0m", `✗ Impossible de contacter Ollama sur ${OLLAMA_URL}.`);
+    console.log("Assurez-vous qu'Ollama est démarré et fonctionne.");
+  }
+}
+
 // Setup dev server or static serve logic
 async function bootstrap() {
+  // Run diagnostics for Ollama connection if active
+  await checkOllamaConnection();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
