@@ -1,13 +1,3 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
-
-# Run and deploy your AI Studio app
-
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/300a5f41-02a4-490e-a8e7-09c8b2504c09
-
 ## Lancement en Local (avec Ollama)
 
 Cette application est optimisée pour s'exécuter localement à l'aide d'**Ollama** pour l'intelligence artificielle (vectorisation et synthèse) et de **Qdrant** pour la base de données vectorielle.
